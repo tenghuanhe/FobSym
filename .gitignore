@@ -1,0 +1,6 @@
+FobSym.sdf
+FobSym.opensdf
+ipch/*
+Debug/*
+FobSym/Debug/*
+
