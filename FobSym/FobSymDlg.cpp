@@ -17,6 +17,12 @@
 UINT Thread_Target(LPVOID pParam);
 UINT Thread_EEG_Data(LPVOID pParam);
 UINT Thread_Fob_Data(LPVOID pParam);
+
+HANDLE g_EventStopall;
+HANDLE g_EventFobready;
+HANDLE g_EventEEGready;
+HANDLE g_EventStartall;
+
 void convert(char data[12], double pos[3]);
 
 // variables for SYMTOP
@@ -76,38 +82,13 @@ BOOL CFobSymDlg::OnInitDialog()
 	bmp1.LoadBitmap(IDB_BITMAP1);
 
 	// Init for SYMTOP EEG amplifier
-	g_hDevice = OpenDevice();
-	if (g_hDevice == INVALID_HANDLE_VALUE)
-	{
-		AfxMessageBox(_T("Failing to open EEG amplifier"));
-	}
-	g_struDeviceInfo = ReadDeviceInfo(g_hDevice);
-	g_bWatch = FALSE;
+
+	g_EventStopall = CreateEvent(NULL, TRUE, FALSE, NULL);
+	g_EventFobready = CreateEvent(NULL, TRUE, FALSE, NULL);
+	g_EventEEGready = CreateEvent(NULL, TRUE, FALSE, NULL);
+	g_EventStartall = CreateEvent(NULL, TRUE, FALSE, NULL);
 
 	// Init for Flock of birds motion tracker
-	port1.Open(1, 115200, CSerialPort::NoParity, 8, CSerialPort::OneStopBit,CSerialPort::XonXoffFlowControl);
-	port1.ClearReadBuffer();
-	port1.ClearWriteBuffer();
-	port1.SetRTS();
-	Sleep(500);
-	port1.ClearRTS();
-	Sleep(500);
-
-	port4.Open(4, 115200, CSerialPort::NoParity, 8, CSerialPort::OneStopBit,CSerialPort::XonXoffFlowControl);
-	port4.ClearReadBuffer();
-	port4.ClearWriteBuffer();
-	port4.SetRTS();
-	Sleep(500);
-	port4.ClearRTS();
-	Sleep(500);
-
-	port1.TransmitChar('P');
-	port1.TransmitChar(50);
-	port1.TransmitChar(2);
-	Sleep(500);
-
-	port4.TransmitChar('Y');
-	Sleep(500);
 
 	return TRUE;  // return TRUE  unless you set the focus to a control
 }
@@ -153,6 +134,13 @@ HCURSOR CFobSymDlg::OnQueryDragIcon()
 	return static_cast<HCURSOR>(m_hIcon);
 }
 
+void CFobSymDlg::OnStart()
+{
+	AfxBeginThread(&Thread_Target, AfxGetApp()->GetMainWnd());
+	AfxBeginThread(&Thread_Fob_Data, AfxGetApp()->GetMainWnd());
+	AfxBeginThread(&Thread_EEG_Data, AfxGetApp()->GetMainWnd());
+}
+
 UINT Thread_Target(LPVOID pParam)
 {
 	CFobSymDlg* pDlg = (CFobSymDlg*)pParam;
@@ -162,11 +150,14 @@ UINT Thread_Target(LPVOID pParam)
 	double dfMinus, dfFreq, dfTim;
 	QueryPerformanceFrequency(&lTemp);
 	dfFreq = (double)lTemp.QuadPart;
-
 	CWnd* pWnd = pDlg->GetDlgItem(IDC_PICTURE1);
-	for (int i = 0; i < 10000; i++)
+
+	WaitForSingleObject(g_EventFobready, INFINITE);
+	WaitForSingleObject(g_EventEEGready, INFINITE);
+	SetEvent(g_EventStartall);
+
+	for (int i = 0; i < 2000; i++)
 	{
-		i %= 1940;
 		QueryPerformanceCounter(&lTemp);
 		QPart1 = lTemp.QuadPart;		
 		do 
@@ -176,27 +167,23 @@ UINT Thread_Target(LPVOID pParam)
 			dfMinus = (double)(QPart2 - QPart1);
 			dfTim = dfMinus / dfFreq;
 		} while (dfTim < 0.01);
-		pWnd->SetWindowPos(AfxGetApp()->GetMainWnd(), i-20, 520, 20, 20, SWP_NOZORDER);
+		pWnd->SetWindowPos(AfxGetApp()->GetMainWnd(), i%1940-20, 520, 20, 20, SWP_NOZORDER);
 	}
 
+	SetEvent(g_EventStopall);	// Stop collecting fob and eeg data
+
 	return 0;
-}
-
-
-void CFobSymDlg::OnStart()
-{
-	// TODO: Add your control notification handler code here
-	AfxBeginThread(&Thread_Target, AfxGetApp()->GetMainWnd());
-	AfxBeginThread(&Thread_Fob_Data, AfxGetApp()->GetMainWnd());
-	GetDlgItem(IDC_POS)->SetWindowTextW(_T("Hello Fob"));
-	AfxBeginThread(&Thread_EEG_Data, AfxGetApp()->GetMainWnd());
-	GetDlgItem(IDC_EEG)->SetWindowTextW(_T("Hello EEG"));
 }
 
 UINT Thread_EEG_Data(LPVOID pParam)
 {
 	CFobSymDlg* pDlg = (CFobSymDlg*) AfxGetApp()->GetMainWnd();
-
+	g_hDevice = OpenDevice();
+	if (g_hDevice == INVALID_HANDLE_VALUE)
+	{
+		AfxMessageBox(_T("Failing to open EEG amplifier"));
+	}
+	g_struDeviceInfo = ReadDeviceInfo(g_hDevice);
 	g_bWatch = TRUE;
 	g_nTimes = 0;
 	g_lData = 0;
@@ -204,7 +191,11 @@ UINT Thread_EEG_Data(LPVOID pParam)
 	g_dwNullTimes = 0;
 	CString cs;
 
-	while (TRUE)
+	SetEvent(g_EventEEGready);
+	WaitForSingleObject(g_EventStartall, INFINITE);
+	pDlg->GetDlgItem(IDC_EEG)->SetWindowTextW(_T("Hello EEG"));
+
+	while (WAIT_OBJECT_0 != WaitForSingleObject(g_EventStopall, 0))
 	{
 		g_dwNullTimes++;
 		
@@ -221,7 +212,7 @@ UINT Thread_EEG_Data(LPVOID pParam)
 		ULONG nCounts;
 		if (!ReadData(g_hDevice, &g_pBufferTmp[0], &nCounts))
 			continue;
-		cs.Format(_T("%d %d %d"), g_pBufferTmp[23], g_pBufferTmp[34], g_pBufferTmp[45]);
+		cs.Format(_T("%d %d %d %ld"), g_pBufferTmp[23], g_pBufferTmp[34], g_pBufferTmp[45], lData);
 		pDlg->GetDlgItem(IDC_EEG)->SetWindowTextW(cs);
 		lData++;
 		if (lData == 1)
@@ -230,26 +221,88 @@ UINT Thread_EEG_Data(LPVOID pParam)
 		}
 	}
 
+	pDlg->GetDlgItem(IDC_EEG)->SetWindowTextW(_T("EEG bye"));
+
 	return 0;
 }
 
 UINT Thread_Fob_Data(LPVOID pParam)
 {
 	CFobSymDlg *pDlg = (CFobSymDlg *) AfxGetApp()->GetMainWnd();
+
+	port1.Open(1, 115200, CSerialPort::NoParity, 8, CSerialPort::OneStopBit,CSerialPort::XonXoffFlowControl);
+	port1.SetRTS();
+	Sleep(500);
+	port1.ClearRTS();
+	Sleep(500);
+
+	port4.Open(5, 115200, CSerialPort::NoParity, 8, CSerialPort::OneStopBit,CSerialPort::XonXoffFlowControl);
+	port4.SetRTS();
+	Sleep(500);
+	port4.ClearRTS();
+	Sleep(500);
+
+	CString cs;
+	cs.Format(_T("%d bytes waiting in port1, %d bytes waiting in port4"), port1.BytesWaiting(), port4.BytesWaiting());
+	pDlg->GetDlgItem(IDC_POS)->SetWindowTextW(cs);
+	if (port1.BytesWaiting() > 0)
+		port1.ClearReadBuffer();
+	if (port4.BytesWaiting() > 0)
+		port4.ClearReadBuffer();
+
+	cs.Format(_T("%d bytes waiting in port1, %d bytes waiting in port4"), port1.BytesWaiting(), port4.BytesWaiting());
+	pDlg->GetDlgItem(IDC_POS)->SetWindowTextW(cs);
+
+	port1.TransmitChar('P');
+	port1.TransmitChar(50);
+	port1.TransmitChar(2);
+	Sleep(1000);
+
+	port4.TransmitChar('Y');
+	Sleep(1000);
+
+	SetEvent(g_EventFobready);
+	WaitForSingleObject(g_EventStartall, INFINITE);
+	pDlg->GetDlgItem(IDC_POS)->SetWindowTextW(_T("Hello Fob"));
+
 	char sBuf[12];
 	double pos[3];
-	CString cs;
+	char bbuf[1] = {'B'};
 
-	while (true) {
-		port4.TransmitChar('B');
-		while (port4.BytesWaiting() < 12)
-			continue;
+	LARGE_INTEGER lTemp;
+	LONGLONG QPart1, QPart2;
+	double dfMinus, dfFreq, dfTim;
+	QueryPerformanceFrequency(&lTemp);
+	dfFreq = (double)lTemp.QuadPart;
+
+	int i = 0;
+	while (WAIT_OBJECT_0 != WaitForSingleObject(g_EventStopall, 0)) {
+		QueryPerformanceCounter(&lTemp);
+		QPart1 = lTemp.QuadPart;
+
+		port4.ClearReadBuffer();
+		port4.ClearWriteBuffer();
+		port4.Write(bbuf, 1);
+		do {
+			QueryPerformanceCounter(&lTemp);
+			QPart2 = lTemp.QuadPart;
+			dfMinus = (double)(QPart2 - QPart1);
+			dfTim = dfMinus / dfFreq;
+		} while (dfTim < 0.0075);
+
+		// Why can't use while {continue}?
 
 		port4.Read(sBuf, 12);
 		convert(sBuf, pos);
-		cs.Format(_T("%.2lf, %.2lf, %.2lf"), pos[0], pos[1], pos[2]);
+		cs.Format(_T("%.2lf, %.2lf, %.2lf, %d"), pos[0], pos[1], pos[2], i++);
 		pDlg->GetDlgItem(IDC_POS)->SetWindowTextW(cs);
 	}
+
+	port1.Close();
+	port4.Close();
+
+	pDlg->GetDlgItem(IDC_POS)->SetWindowTextW(_T("Fob bye"));
+
 	return 0;
 }
 
